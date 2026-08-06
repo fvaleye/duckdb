@@ -2,6 +2,8 @@
 # description: Struct pushdown-extract filters with pruned columns, with and without late materialization
 # group: [optimizer]
 
+require parquet
+
 statement ok
 SET late_materialization_max_rows = 100;
 
@@ -81,3 +83,65 @@ query I
 SELECT x FROM pushdown_extract_multi WHERE s.a + s.b = 12 ORDER BY x LIMIT 1
 ----
 10
+
+# A cast between the pushable prefix and the leaf leaves a residual extract above the scan. Running
+# the pruner a second time pushes that residual down again, relative to the already narrowed column.
+
+statement ok
+CREATE TABLE nested_extract AS SELECT
+    {'id': k, 'ms': {'a': k * 100, 'b': k + 30, 'c': {'d': k + 7}}} AS v
+FROM range(3) t(k)
+
+query I
+SELECT (v.ms::STRUCT(b VARCHAR, a VARCHAR)).b FROM nested_extract ORDER BY v.id LIMIT 1
+----
+30
+
+query I
+SELECT (v.ms::STRUCT(b VARCHAR, a VARCHAR)).a FROM nested_extract ORDER BY v.id LIMIT 1
+----
+0
+
+# An identity cast keeps the leaf reachable from the scan, so this shape stays correct either way
+query I
+SELECT (v.ms::STRUCT(a VARCHAR, b VARCHAR)).b FROM nested_extract ORDER BY v.id LIMIT 1
+----
+30
+
+# A third level threw an internal exception from the statistics propagator
+query I
+SELECT (v.ms::STRUCT(c STRUCT(d VARCHAR), b VARCHAR, a VARCHAR)).c.d
+FROM nested_extract ORDER BY v.id LIMIT 1
+----
+7
+
+# The same result without late materialization
+statement ok
+SET disabled_optimizers = 'LATE_MATERIALIZATION';
+
+query I
+SELECT (v.ms::STRUCT(b VARCHAR, a VARCHAR)).b FROM nested_extract ORDER BY v.id LIMIT 1
+----
+30
+
+statement ok
+SET disabled_optimizers = '';
+
+# the second pruner run only happens when this is planned as a late materialization
+statement ok
+PRAGMA explain_output = OPTIMIZED_ONLY
+
+query II
+EXPLAIN SELECT (v.ms::STRUCT(b VARCHAR, a VARCHAR)).b FROM nested_extract ORDER BY v.id LIMIT 1
+----
+logical_opt	<REGEX>:.*rowid.*
+
+# The same over parquet, where a second push failed inside the column reader instead
+statement ok
+COPY nested_extract TO '__TEST_DIR__/nested_extract.parquet' (FORMAT PARQUET)
+
+query I
+SELECT (v.ms::STRUCT(b VARCHAR, a VARCHAR)).b
+FROM '__TEST_DIR__/nested_extract.parquet' ORDER BY v.id LIMIT 1
+----
+30

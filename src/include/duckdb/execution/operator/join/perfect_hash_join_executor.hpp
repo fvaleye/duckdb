@@ -39,6 +39,7 @@ public:
 
 	const LogicalType &GetKeyType() const;
 	bool BuildPerfectHashTable();
+	bool EmitsNoBuildColumns() const;
 
 	unique_ptr<OperatorState> GetOperatorState(ExecutionContext &context);
 	OperatorResultType ProbePerfectHashTable(ExecutionContext &context, DataChunk &input, DataChunk &lhs_output_columns,

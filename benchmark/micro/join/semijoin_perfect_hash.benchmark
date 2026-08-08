@@ -1,0 +1,16 @@
+# name: benchmark/micro/join/semijoin_perfect_hash.benchmark
+# description: Semi join over a small dense integer build side, which runs through the perfect hash join
+# group: [join]
+
+name Semi Join Perfect Hash
+group join
+
+load
+CREATE TABLE dim AS SELECT i::INTEGER AS k FROM range(1000000) t(i);
+CREATE TABLE fact AS SELECT (i % 2000000)::INTEGER AS k FROM range(20000000) t(i);
+
+run
+SELECT count(*) FROM fact WHERE k IN (SELECT k FROM dim)
+
+result I
+10000000

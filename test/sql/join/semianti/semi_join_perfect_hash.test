@@ -1,0 +1,177 @@
+# name: test/sql/join/semianti/semi_join_perfect_hash.test
+# description: Semi joins over a build side small enough for a perfect hash table
+# group: [semianti]
+
+
+statement ok
+CREATE TABLE build_side(k INTEGER);
+
+statement ok
+INSERT INTO build_side VALUES (2), (4), (6), (8);
+
+statement ok
+CREATE TABLE probe_side(k INTEGER, payload VARCHAR);
+
+statement ok
+INSERT INTO probe_side VALUES
+	(1, 'below'), (2, 'hit'), (4, 'hit'), (5, 'miss'), (8, 'hit'), (99, 'above'), (NULL, 'null key');
+
+query IT
+SELECT k, payload FROM probe_side WHERE k IN (SELECT k FROM build_side) ORDER BY k
+----
+2	hit
+4	hit
+8	hit
+
+
+query IT
+SELECT k, payload FROM probe_side p WHERE EXISTS (SELECT 1 FROM build_side b WHERE b.k = p.k) ORDER BY k
+----
+2	hit
+4	hit
+8	hit
+
+# a probe key outside the build's min/max range must not match
+query I
+SELECT count(*) FROM probe_side WHERE k IN (SELECT k FROM build_side) AND (k < 2 OR k > 8)
+----
+0
+
+# a NULL probe key matches nothing
+query I
+SELECT count(*) FROM probe_side WHERE k IS NULL AND k IN (SELECT k FROM build_side)
+----
+0
+
+# duplicated probe rows are each emitted once, and only once
+statement ok
+CREATE TABLE probe_dupes AS SELECT 2 AS k FROM range(5) UNION ALL SELECT 3 FROM range(7);
+
+query I
+SELECT count(*) FROM probe_dupes WHERE k IN (SELECT k FROM build_side)
+----
+5
+
+# a NULL in the build side must not make everything match
+statement ok
+INSERT INTO build_side VALUES (NULL);
+
+query IT
+SELECT k, payload FROM probe_side WHERE k IN (SELECT k FROM build_side) ORDER BY k
+----
+2	hit
+4	hit
+8	hit
+
+# an empty build side matches nothing
+statement ok
+CREATE TABLE empty_build(k INTEGER);
+
+query I
+SELECT count(*) FROM probe_side WHERE k IN (SELECT k FROM empty_build)
+----
+0
+
+# a dense build side, where every slot in the range is occupied
+statement ok
+CREATE TABLE dense_build AS SELECT i::INTEGER AS k FROM range(1000) t(i);
+
+statement ok
+CREATE TABLE dense_probe AS SELECT (i % 1500)::INTEGER AS k FROM range(3000) t(i);
+
+query I
+SELECT count(*) FROM dense_probe WHERE k IN (SELECT k FROM dense_build)
+----
+2000
+
+# every integer width goes through the same templated probe
+foreach type TINYINT SMALLINT INTEGER BIGINT HUGEINT UTINYINT USMALLINT UINTEGER UBIGINT
+
+statement ok
+CREATE TABLE b_{type}(k {type});
+
+statement ok
+INSERT INTO b_{type} VALUES (2), (4), (6);
+
+statement ok
+CREATE TABLE p_{type}(k {type});
+
+statement ok
+INSERT INTO p_{type} VALUES (1), (2), (4), (5), (6), (7);
+
+query I
+SELECT k FROM p_{type} WHERE k IN (SELECT k FROM b_{type}) ORDER BY k
+----
+2
+4
+6
+
+statement ok
+DROP TABLE b_{type};
+
+statement ok
+DROP TABLE p_{type};
+
+endloop
+
+# the semi join result must not depend on the perfect hash table being chosen: a build side whose
+# range exceeds the threshold takes the general hash join and must agree
+statement ok
+CREATE TABLE wide_build AS SELECT (i * 100000)::BIGINT AS k FROM range(50) t(i);
+
+statement ok
+CREATE TABLE wide_probe AS SELECT (i * 50000)::BIGINT AS k FROM range(200) t(i);
+
+query I
+SELECT count(*) FROM wide_probe WHERE k IN (SELECT k FROM wide_build)
+----
+50
+
+# a semi join reads the table as a set, so duplicate build keys are admitted
+statement ok
+CREATE TABLE dup_build(k INTEGER);
+
+statement ok
+INSERT INTO dup_build VALUES (2), (2), (4), (4), (4), (8);
+
+
+query IT
+SELECT k, payload FROM probe_side WHERE k IN (SELECT k FROM dup_build) ORDER BY k
+----
+2	hit
+4	hit
+8	hit
+
+query IT
+SELECT k, payload FROM probe_side p WHERE EXISTS (SELECT 1 FROM dup_build b WHERE b.k = p.k) ORDER BY k
+----
+2	hit
+4	hit
+8	hit
+
+# every build key duplicated, so the count exceeds the range by a wide margin
+statement ok
+CREATE TABLE heavy_dup_build AS SELECT (i % 100)::INTEGER AS k FROM range(10000) t(i)
+
+statement ok
+CREATE TABLE heavy_probe AS SELECT (i % 250)::INTEGER AS k FROM range(1000) t(i)
+
+query I
+SELECT count(*) FROM heavy_probe WHERE k IN (SELECT k FROM heavy_dup_build)
+----
+400
+
+# an inner join over the same duplicate build must still emit one row per copy
+query I
+SELECT count(*) FROM probe_side p JOIN dup_build b ON b.k = p.k
+----
+6
+
+# probe entirely inside a dense duplicate-heavy build domain, which reaches the Reference fast path
+statement ok
+CREATE TABLE inside_probe AS SELECT (i % 100)::INTEGER AS k FROM range(5000) t(i)
+
+query I
+SELECT count(*) FROM inside_probe WHERE k IN (SELECT k FROM heavy_dup_build)
+----
+5000

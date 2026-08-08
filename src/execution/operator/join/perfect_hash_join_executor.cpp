@@ -79,9 +79,9 @@ bool PerfectHashJoinExecutor::CanDoPerfectHashJoin(const PhysicalHashJoin &op, c
 		return true; // Already true based on static statistics
 	}
 
-	// We only do this optimization for inner joins with one integer equality condition
+	// We only do this optimization for inner and semi joins with one integer equality condition
 	const auto key_type = op.conditions[0].GetLHS().GetReturnType();
-	if (op.join_type != JoinType::INNER || op.conditions.size() != 1 ||
+	if ((op.join_type != JoinType::INNER && op.join_type != JoinType::SEMI) || op.conditions.size() != 1 ||
 	    op.conditions[0].GetComparisonType() != ExpressionType::COMPARE_EQUAL ||
 	    !TypeIsInteger(key_type.InternalType())) {
 		return false;
@@ -123,13 +123,17 @@ bool PerfectHashJoinExecutor::CanDoPerfectHashJoin(const PhysicalHashJoin &op, c
 	}
 	perfect_join_statistics.build_range = NumericCast<idx_t>(build_range);
 
-	// If count is larger than range (duplicates), we bail out
-	if (ht.Count() > perfect_join_statistics.build_range) {
+	// A semi join emits at most one row per probe row, so build multiplicity cannot change its result
+	if (op.join_type != JoinType::SEMI && ht.Count() > perfect_join_statistics.build_range) {
 		return false;
 	}
 
 	perfect_join_statistics.is_build_small = true;
 	return true;
+}
+
+bool PerfectHashJoinExecutor::EmitsNoBuildColumns() const {
+	return join.rhs_output_columns.col_types.empty();
 }
 
 //===--------------------------------------------------------------------===//
@@ -235,13 +239,15 @@ bool PerfectHashJoinExecutor::TemplatedFillSelectionVectorBuild(const Vector &so
 		// add index to selection vector if value in the range
 		if (min_value <= input_value && input_value <= max_value) {
 			auto idx = UnsafeNumericCast<idx_t>(input_value - min_value); // subtract min value to get the idx position
-			sel_vec.set_index(sel_idx, idx);
 			if (bitmap_build_idx.RowIsValidUnsafe(idx)) {
-				return false;
-			} else {
-				bitmap_build_idx.SetValidUnsafe(idx);
-				unique_keys++;
+				if (join.join_type != JoinType::SEMI) {
+					return false;
+				}
+				continue;
 			}
+			bitmap_build_idx.SetValidUnsafe(idx);
+			unique_keys++;
+			sel_vec.set_index(sel_idx, idx);
 			seq_sel_vec.set_index(sel_idx++, i);
 		}
 	}
@@ -289,7 +295,12 @@ OperatorResultType PerfectHashJoinExecutor::ProbePerfectHashTable(ExecutionConte
 	const auto &keys_vec = state.join_keys.data[0];
 	auto keys_count = state.join_keys.size();
 	// todo: add check for fast pass when probe is part of build domain
-	FillSelectionVectorSwitchProbe(keys_vec, keys_count, state.probe_sel_vec, probe_sel_count, &state.build_sel_vec);
+	// Only the gather loop below reads the build selection vector
+	optional_ptr<SelectionVector> build_sel_vec;
+	if (!EmitsNoBuildColumns()) {
+		build_sel_vec = state.build_sel_vec;
+	}
+	FillSelectionVectorSwitchProbe(keys_vec, keys_count, state.probe_sel_vec, probe_sel_count, build_sel_vec);
 
 	// If build is dense and probe is in build's domain, just reference probe
 	if (perfect_join_statistics.is_build_dense && keys_count == probe_sel_count) {

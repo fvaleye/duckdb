@@ -1,0 +1,226 @@
+# name: test/optimizer/or_equality_to_in_clause.test
+# description: Test rewriting x = c1 OR x = c2 OR ... into x IN (c1, c2, ...)
+# group: [optimizer]
+
+statement ok
+PRAGMA explain_output = PHYSICAL_ONLY;
+
+statement ok
+CREATE TABLE integers AS SELECT a AS a, a AS b FROM generate_series(1, 10, 1) tbl(a);
+
+# a dense set of integers collapses further, into a range the scan can prune with
+query II
+EXPLAIN SELECT * FROM integers WHERE a=3 OR a=4 OR a=5
+----
+physical_plan	<REGEX>:.*Filters: \(a >= 3\) AND \(a <= 5\).*
+
+query II
+SELECT * FROM integers WHERE a=3 OR a=4 OR a=5 ORDER BY a
+----
+3	3
+4	4
+5	5
+
+# a sparse set stays an IN list
+query II
+EXPLAIN SELECT * FROM integers WHERE a=2 OR a=7
+----
+physical_plan	<REGEX>:.*a IN \(2, 7\).*
+
+query II
+SELECT * FROM integers WHERE a=2 OR a=7 ORDER BY a
+----
+2	2
+7	7
+
+# the same column reached through an expression is still one target
+query I
+SELECT count(*) FROM integers WHERE a+1=3 OR a+1=8
+----
+2
+
+# duplicated values are harmless
+query II
+SELECT * FROM integers WHERE a=4 OR a=4 ORDER BY a
+----
+4	4
+
+# a branch that is already an IN list is absorbed rather than left behind, which is what a nested
+# disjunction produces once predicate factoring has run over it
+query II
+EXPLAIN SELECT * FROM integers WHERE (a=2 OR a=7) OR a=9
+----
+physical_plan	<REGEX>:.*a IN \(2, 7, 9\).*
+
+query II
+SELECT * FROM integers WHERE (a=2 OR a=7) OR a=9 ORDER BY a
+----
+2	2
+7	7
+9	9
+
+# and the same when the IN list is written by hand
+query II
+EXPLAIN SELECT * FROM integers WHERE a IN (2, 7) OR a=9
+----
+physical_plan	<REGEX>:.*a IN \(2, 7, 9\).*
+
+query II
+SELECT * FROM integers WHERE a IN (2, 7) OR a=9 ORDER BY a
+----
+2	2
+7	7
+9	9
+
+# merging two IN lists on the same column
+query II
+SELECT * FROM integers WHERE a IN (1, 2) OR a IN (9, 10) ORDER BY a
+----
+1	1
+2	2
+9	9
+10	10
+
+# NOT rewritten: an IN list on a different column
+query II
+EXPLAIN SELECT * FROM integers WHERE a IN (1, 2) OR b IN (9, 10)
+----
+physical_plan	<!REGEX>:.*a IN \(1, 2, 9, 10\).*
+
+# NOT rewritten: a volatile target. The chain evaluates it once per branch and an IN clause evaluates
+# it once, so rewriting would change how many times the sequence advances.
+statement ok
+CREATE SEQUENCE seq START 1;
+
+query I
+SELECT count(*) FROM range(5) t(x)
+WHERE nextval('seq')=1000 OR nextval('seq')=1001 OR nextval('seq')=1002
+   OR nextval('seq')=1003 OR nextval('seq')=1004 OR nextval('seq')=1005
+----
+0
+
+query I
+SELECT currval('seq')
+----
+30
+
+# NOT rewritten: nested constants. An interior NULL compares differently through the IN clause's
+# mark join than through the chain, so a rewrite here would change the answer from NULL to true.
+statement ok
+CREATE TABLE structs(s STRUCT(a INTEGER, b INTEGER));
+
+statement ok
+INSERT INTO structs VALUES ({'a': 1, 'b': 2});
+
+query I
+SELECT NOT (s={'a':1,'b':NULL} OR s={'a':2,'b':2} OR s={'a':3,'b':3}
+         OR s={'a':4,'b':4} OR s={'a':5,'b':5}) FROM structs
+----
+NULL
+
+statement ok
+CREATE TABLE lists(l INTEGER[]);
+
+statement ok
+INSERT INTO lists VALUES ([1, 2]);
+
+query I
+SELECT NOT (l=[1,NULL] OR l=[2,2] OR l=[3,3] OR l=[4,4] OR l=[5,5]) FROM lists
+----
+NULL
+
+# NOT rewritten: different columns
+query II
+EXPLAIN SELECT * FROM integers WHERE a=1 OR b=2
+----
+physical_plan	<!REGEX>:.*a IN .*
+
+query II
+SELECT * FROM integers WHERE a=1 OR b=2 ORDER BY a
+----
+1	1
+2	2
+
+# NOT rewritten: a comparison that is not an equality
+query II
+EXPLAIN SELECT * FROM integers WHERE a=1 OR a>8
+----
+physical_plan	<!REGEX>:.*a IN .*
+
+query II
+SELECT * FROM integers WHERE a=1 OR a>8 ORDER BY a
+----
+1	1
+9	9
+10	10
+
+# NOT rewritten: the right hand side is not constant
+query II
+SELECT * FROM integers WHERE a=1 OR a=b ORDER BY a
+----
+1	1
+2	2
+3	3
+4	4
+5	5
+6	6
+7	7
+8	8
+9	9
+10	10
+
+# NULL handling must match: x = NULL and x IN (..., NULL) are both NULL rather than false
+statement ok
+CREATE TABLE with_nulls AS SELECT * FROM (VALUES (1), (2), (NULL)) t(c);
+
+query I
+SELECT count(*) FROM with_nulls WHERE c=1 OR c=NULL
+----
+1
+
+query I
+SELECT c FROM with_nulls WHERE c=2 OR c=NULL
+----
+2
+
+# a NULL row never matches either form
+query I
+SELECT count(*) FROM with_nulls WHERE c=1 OR c=2
+----
+2
+
+# strings rewrite too
+statement ok
+CREATE TABLE strings(s VARCHAR);
+
+statement ok
+INSERT INTO strings VALUES ('a'), ('b'), ('c'), (NULL);
+
+query II
+EXPLAIN SELECT * FROM strings WHERE s='a' OR s='c'
+----
+physical_plan	<REGEX>:.*s IN \('a', 'c'\).*
+
+query I
+SELECT s FROM strings WHERE s='a' OR s='c' ORDER BY s
+----
+a
+c
+
+# the rewrite must not change results with the expression rewriter disabled
+statement ok
+SET disabled_optimizers='expression_rewriter';
+
+query II
+SELECT * FROM integers WHERE a=2 OR a=7 ORDER BY a
+----
+2	2
+7	7
+
+query I
+SELECT count(*) FROM with_nulls WHERE c=1 OR c=NULL
+----
+1
+
+statement ok
+RESET disabled_optimizers;

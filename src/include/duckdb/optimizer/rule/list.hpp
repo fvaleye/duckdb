@@ -8,6 +8,7 @@
 #include "duckdb/optimizer/rule/date_trunc_simplification.hpp"
 #include "duckdb/optimizer/rule/distributivity.hpp"
 #include "duckdb/optimizer/rule/empty_needle_removal.hpp"
+#include "duckdb/optimizer/rule/or_equality_to_in_clause.hpp"
 #include "duckdb/optimizer/rule/string_prefix.hpp"
 #include "duckdb/optimizer/rule/like_optimizations.hpp"
 #include "duckdb/optimizer/rule/list_comprehension_rewrite.hpp"

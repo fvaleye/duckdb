@@ -1,0 +1,44 @@
+# name: test/optimizer/statistics/statistics_count_not_null_pruning.test
+# description: Prune columns made unused by aggregate statistics rewrites
+# group: [statistics]
+
+statement ok
+PRAGMA explain_output = PHYSICAL_ONLY
+
+statement ok
+CREATE TABLE events(user_id INTEGER NOT NULL, session_id INTEGER, device_type VARCHAR)
+
+statement ok
+INSERT INTO events VALUES (1, NULL, 'Desktop'), (2, 2, 'Mobile')
+
+query II
+EXPLAIN SELECT device_type, count(user_id) FROM events GROUP BY device_type
+----
+physical_plan	<!REGEX>:.*user_id.*
+
+query TII
+SELECT device_type, count(user_id), count(session_id)
+FROM events GROUP BY device_type ORDER BY device_type
+----
+Desktop	1	0
+Mobile	1	1
+
+statement ok
+CREATE TABLE cs(a INTEGER, b INTEGER NOT NULL)
+
+statement ok
+INSERT INTO cs SELECT i, i FROM range(3) t(i)
+
+query II
+SELECT * FROM (
+    SELECT a, (SELECT count(b) FROM cs) AS c FROM cs
+    UNION ALL
+    SELECT a, (SELECT count(b) FROM cs) AS c FROM cs
+) ORDER BY 1, 2
+----
+0	3
+0	3
+1	3
+1	3
+2	3
+2	3

@@ -666,13 +666,18 @@ void RemoveUnusedColumns::VisitOperator(unique_ptr<LogicalOperator> &op_ref) {
 
 		// Mark this CTE reference as a seen reader of the CTE
 		it->second.seen_readers.insert(cte_ref.table_index);
+		idx_t local_reference_count = 0;
 		for (auto &entry : column_references) {
 			if (entry.first.table_index == cte_ref.table_index) {
 				referenced_columns.insert(entry);
+				local_reference_count++;
 			}
 		}
 
-		cte_entry.everything_referenced = cte_ref.chunk_types.size() == referenced_columns.size();
+		// A full-schema requirement from one reader must not be reset by a later reader.
+		if (everything_referenced || cte_ref.chunk_types.size() == local_reference_count) {
+			cte_entry.everything_referenced = true;
+		}
 		break;
 	}
 	case LogicalOperatorType::LOGICAL_COPY_TO_FILE:

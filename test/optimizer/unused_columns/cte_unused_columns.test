@@ -29,3 +29,10 @@ WITH test AS MATERIALIZED (SELECT * FROM o_order)
 SELECT col0, col6, t2.* FROM test, (SELECT col1 FROM test) t2;
 ----
 logical_opt	<!REGEX>:.*col[2-5].*
+
+query II
+EXPLAIN
+WITH test AS MATERIALIZED (SELECT col0, col1 FROM o_order)
+SELECT t1.col0 FROM test t1 JOIN test t2 USING (col0) JOIN test t3 USING (col0);
+----
+logical_opt	<!REGEX>:.*col1.*

@@ -1,0 +1,57 @@
+# name: test/sql/optimizer/pushdown_extract_reapplied.test
+# group: [optimizer]
+
+statement ok
+SET late_materialization_max_rows = 100
+
+statement ok
+CREATE TABLE structs AS SELECT
+	{'id': k, 'my_struct': {'a': k * 100, 'b': k + 30, 'c': {'d': k + 7}}} AS v
+FROM range(5) t(k)
+
+statement ok
+CHECKPOINT
+
+query I
+SELECT (v.my_struct::STRUCT(b VARCHAR, a VARCHAR)).b
+FROM structs ORDER BY v.id LIMIT 1
+----
+30
+
+query I
+SELECT (v.my_struct::STRUCT(a VARCHAR, b VARCHAR)).b
+FROM structs ORDER BY v.id LIMIT 1
+----
+30
+
+query I
+SELECT (v.my_struct::STRUCT(c STRUCT(d VARCHAR), b VARCHAR, a VARCHAR)).c.d
+FROM structs ORDER BY v.id LIMIT 1
+----
+7
+
+statement ok
+SET variant_minimum_shredding_size = 0
+
+statement ok
+CREATE TABLE variants AS SELECT
+	{'id': k, 'my_struct': {'a': k, 'b': k + 30}}::VARIANT AS v
+FROM range(5) t(k)
+
+statement ok
+CHECKPOINT
+
+query I
+SELECT (v.my_struct::STRUCT(b VARCHAR, a VARCHAR)).b
+FROM variants ORDER BY v.id LIMIT 1
+----
+30
+
+query I
+SELECT (v.my_struct::STRUCT(b VARCHAR, a VARCHAR)).b[1]
+FROM variants ORDER BY v.id LIMIT 1
+----
+3
+
+statement ok
+RESET variant_minimum_shredding_size

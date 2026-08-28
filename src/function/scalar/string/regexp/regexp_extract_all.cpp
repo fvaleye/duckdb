@@ -1,3 +1,4 @@
+#include "duckdb/common/optional_ptr.hpp"
 #include "duckdb/common/vector/flat_vector.hpp"
 #include "duckdb/common/vector/list_vector.hpp"
 #include "duckdb/common/vector/map_vector.hpp"
@@ -22,7 +23,7 @@ RegexpExtractAll::InitLocalState(ExpressionState &state, const BoundFunctionExpr
 	if (info.constant_pattern) {
 		return make_uniq<RegexLocalState>(info, true);
 	}
-	return nullptr;
+	return make_uniq<RegexpPatternCacheLocalState>(info.options);
 }
 
 unique_ptr<FunctionLocalState> RegexpExtractAllStruct::InitLocalState(ExpressionState &state,
@@ -96,7 +97,7 @@ int32_t GetGroupIndex(DataChunk &args, idx_t row, int32_t &result) {
 }
 
 duckdb_re2::RE2 &GetPattern(const RegexpBaseBindData &info, ExpressionState &state,
-                            unique_ptr<duckdb_re2::RE2> &pattern_p) {
+                            optional_ptr<duckdb_re2::RE2> pattern_p) {
 	if (info.constant_pattern) {
 		auto &lstate = ExecuteFunctionState::GetFunctionState(state)->Cast<RegexLocalState>();
 		return lstate.constant_pattern;
@@ -121,9 +122,12 @@ void RegexpExtractAll::Execute(DataChunk &args, ExpressionState &state, Vector &
 	StringVector::AddHeapReference(ListVector::GetChildMutable(result), strings);
 
 	unique_ptr<RegexStringPieceArgs> non_const_args;
-	unique_ptr<duckdb_re2::RE2> stored_re;
+	optional_ptr<RegexpPatternCacheLocalState> pattern_cache;
+	// Points into the pattern cache; only valid for the row it was fetched for.
+	optional_ptr<duckdb_re2::RE2> stored_re;
 	if (!info.constant_pattern) {
 		non_const_args = make_uniq<RegexStringPieceArgs>();
+		pattern_cache = &ExecuteFunctionState::GetFunctionState(state)->Cast<RegexpPatternCacheLocalState>();
 	} else {
 		// Verify that the constant pattern is valid
 		auto &re = GetPattern(info, state, stored_re);
@@ -141,8 +145,7 @@ void RegexpExtractAll::Execute(DataChunk &args, ExpressionState &state, Vector &
 			if (!pattern_entry.IsValid()) {
 				pattern_valid = false;
 			} else {
-				auto pattern_strpiece = CreateStringPiece(pattern_entry.GetValue());
-				stored_re = make_uniq<duckdb_re2::RE2>(pattern_strpiece, info.options);
+				stored_re = &pattern_cache->GetOrCompile(pattern_entry.GetValue());
 				auto group_count_p = stored_re->NumberOfCapturingGroups();
 				if (group_count_p == -1) {
 					throw InvalidInputException("Pattern failed to parse, error: '%s'", stored_re->error());

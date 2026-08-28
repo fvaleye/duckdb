@@ -1,0 +1,17 @@
+# name: benchmark/micro/string/regexp_matches_dynamic_many.benchmark
+# description: regexp_matches with more distinct patterns than the pattern cache holds, so every lookup misses
+# group: [string]
+
+name Regexp Matches Many Dynamic Patterns
+group string
+
+load
+CREATE TABLE regex_data AS
+SELECT 'string number ' || i AS s, 'number ' || (i % 5000) AS p
+FROM range(1000000) t(i);
+
+run
+SELECT SUM(regexp_matches(s, p)::INT) FROM regex_data
+
+result I
+5685

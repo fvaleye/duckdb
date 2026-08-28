@@ -1,0 +1,266 @@
+# name: test/sql/function/string/regex_dynamic_pattern.test
+# description: regexp functions with a non-constant pattern column (per-thread pattern cache)
+# group: [string]
+
+statement ok
+CREATE TABLE mixed(id INTEGER, s VARCHAR, p VARCHAR);
+
+statement ok
+INSERT INTO mixed VALUES
+  (1, 'abc123', '[a-z]+'), (2, 'abc123', '[0-9]+'), (3, 'abc123', '[a-z]+'),
+  (4, 'abc123', NULL),     (5, NULL,     '[a-z]+'), (6, 'abc123', ''),
+  (7, 'abc123', '(a)(b)'), (8, 'abc123', '(a)'),    (9, 'abc123', '(a)(b)(c)'),
+  (10,'abc123', '(a)');
+
+# repeated, NULL and empty patterns
+query III
+SELECT id, regexp_matches(s, p), regexp_full_match(s, p) FROM mixed ORDER BY id
+----
+1	true	false
+2	true	false
+3	true	false
+4	NULL	NULL
+5	NULL	NULL
+6	true	false
+7	true	false
+8	true	false
+9	true	false
+10	true	false
+
+query III
+SELECT id, regexp_replace(s, p, 'X'), regexp_replace(s, p, 'X', 'g') FROM mixed ORDER BY id
+----
+1	X123	X123
+2	abcX	abcX
+3	X123	X123
+4	NULL	NULL
+5	NULL	NULL
+6	Xabc123	XaXbXcX1X2X3X
+7	Xc123	Xc123
+8	Xbc123	Xbc123
+9	X123	X123
+10	Xbc123	Xbc123
+
+# interleaved patterns with different capture group counts
+query IIII
+SELECT id, regexp_extract(s, p), regexp_extract(s, p, 1), regexp_extract(s, p, 2) FROM mixed ORDER BY id
+----
+1	abc	(empty)	(empty)
+2	123	(empty)	(empty)
+3	abc	(empty)	(empty)
+4	NULL	NULL	NULL
+5	NULL	NULL	NULL
+6	(empty)	(empty)	(empty)
+7	ab	a	b
+8	a	a	(empty)
+9	abc	a	b
+10	a	a	(empty)
+
+query II
+SELECT id, regexp_extract_all(s, p) FROM mixed ORDER BY id
+----
+1	[abc]
+2	[123]
+3	[abc]
+4	NULL
+5	NULL
+6	['', '', '', '', '', '', '']
+7	[ab]
+8	[a]
+9	[abc]
+10	[a]
+
+# a row whose pattern lacks the requested group still errors
+statement error
+SELECT id, regexp_extract_all(s, p, 1) FROM mixed ORDER BY id
+----
+Pattern has 0 groups. Cannot access group 1
+
+query II
+SELECT id, str_split_regex(s, p) FROM mixed ORDER BY id
+----
+1	['', 123]
+2	[abc, '']
+3	['', 123]
+4	[abc123]
+5	NULL
+6	[a, b, c, 1, 2, 3]
+7	['', c123]
+8	['', bc123]
+9	['', 123]
+10	['', bc123]
+
+# capture counts alternating between rows: the group buffer must follow the pattern of the row
+statement ok
+CREATE TABLE caps(id INTEGER, s VARCHAR, p VARCHAR);
+
+statement ok
+INSERT INTO caps VALUES
+  (1,'a1b2','([a-z])([0-9])'), (2,'a1b2','([a-z])'), (3,'a1b2','([a-z])([0-9])([a-z])'),
+  (4,'a1b2','([a-z])'),        (5,'a1b2','([a-z])([0-9])'), (6,'a1b2','([a-z])([0-9])([a-z])([0-9])');
+
+query IIII
+SELECT id, regexp_extract_all(s, p, 1), regexp_extract(s, p, 1), regexp_replace(s, p, '<\1>') FROM caps ORDER BY id
+----
+1	[a, b]	a	<a>b2
+2	[a, b]	a	<a>1b2
+3	[a]	a	<a>2
+4	[a, b]	a	<a>1b2
+5	[a, b]	a	<a>b2
+6	[a]	a	<a>
+
+# a row whose pattern lacks the requested group still errors
+statement error
+SELECT id, regexp_extract_all(s, p, 2) FROM caps ORDER BY id
+----
+Pattern has 1 groups. Cannot access group 2
+
+# options are fixed at bind time, so two option sets over the same pattern column stay independent
+query III
+SELECT p, regexp_matches('ABC', p, 'i'), regexp_matches('ABC', p) FROM (VALUES ('abc'), ('a'), ('abc')) v(p)
+----
+abc	true	false
+a	true	false
+abc	true	false
+
+# str_split_regex honors its options with a column pattern as well
+query II
+SELECT str_split_regex('aBc', p, 'i'), str_split_regex('aBc', p) FROM (VALUES ('b')) v(p)
+----
+[a, c]	[aBc]
+
+# empty and NULL inputs do not evaluate a dynamic delimiter
+query I
+SELECT str_split_regex(s, p) FROM (VALUES
+  (1, '', '('), (2, NULL, '('), (3, '', 'b'), (4, 'a', NULL), (5, '', '(')
+) v(id, s, p) ORDER BY id
+----
+['']
+NULL
+['']
+[a]
+['']
+
+# pattern keys include bytes after an embedded NUL
+query I
+SELECT sum(regexp_full_match(repeat('a', 32) || chr(0) || 'b', p)::INT)
+FROM (VALUES
+  (repeat('a', 32) || chr(0) || 'b'), (repeat('a', 32) || chr(0) || 'c'),
+  (repeat('a', 32) || chr(0) || 'b'), (repeat('a', 32))
+) v(p)
+----
+2
+
+# far more distinct patterns than the cache holds, then a second pass over the same patterns
+statement ok
+CREATE TABLE many AS SELECT i AS id, 'x' || i AS s, 'x' || (i % 200) AS p FROM range(1000) t(i);
+
+query II
+SELECT sum(regexp_matches(s, p)::INT), count(*) FROM many
+----
+208	1000
+
+query II
+SELECT sum(len(regexp_extract_all(s, p))), sum(length(regexp_replace(s, p, 'Q'))) FROM many
+----
+208	3388
+
+query II
+SELECT sum(length(regexp_extract(s, p))), sum(len(str_split_regex(s, p))) FROM many
+----
+710	1208
+
+# a burst of distinct patterns at the front must not lock the cache against the patterns that
+# follow it
+statement ok
+CREATE TABLE poisoned AS
+SELECT 'x' || (i % 2) AS s, CASE WHEN i < 300 THEN 'junk' || i ELSE 'x' || (i % 2) END AS p
+FROM range(10000) t(i);
+
+query III
+SELECT sum(regexp_matches(s, p)::INT), sum(len(regexp_extract_all(s, p))), count(*) FROM poisoned
+----
+9700	9700	10000
+
+# evicted patterns can be compiled again across vector boundaries
+statement ok
+CREATE TABLE cache_rows AS
+SELECT 'x' || (i % 33) AS s, '^x' || (i % 33) || '$' AS p FROM range(10000) t(i);
+
+query IIII
+SELECT sum(regexp_matches(s, p)::INT), sum(regexp_full_match(s, p)::INT),
+       sum(regexp_extract(s, p) = s), sum(len(regexp_extract_all(s, p))) FROM cache_rows
+----
+10000	10000	10000	10000
+
+query II
+SELECT sum(regexp_replace(s, p, 'ok') = 'ok'), sum(len(str_split_regex(s, p))) FROM cache_rows
+----
+10000	20000
+
+# prepared statements use the current pattern values on every execution
+statement ok
+PREPARE cache_check AS SELECT sum(regexp_matches(s, p)::INT) FROM cache_rows;
+
+query I
+EXECUTE cache_check
+----
+10000
+
+statement ok
+UPDATE cache_rows SET p = '^never_matches$';
+
+query I
+EXECUTE cache_check
+----
+0
+
+# an invalid pattern still throws on the row it first appears on
+statement ok
+CREATE TABLE bad(id INTEGER, s VARCHAR, p VARCHAR);
+
+statement ok
+INSERT INTO bad VALUES (1,'abc','a'), (2,'abc','('), (3,'abc','a');
+
+statement error
+SELECT regexp_matches(s, p) FROM bad ORDER BY id
+----
+missing ): (
+
+statement error
+SELECT regexp_full_match(s, p) FROM bad ORDER BY id
+----
+missing ): (
+
+statement error
+SELECT regexp_replace(s, p, 'X') FROM bad ORDER BY id
+----
+missing ): (
+
+statement error
+SELECT regexp_extract_all(s, p) FROM bad ORDER BY id
+----
+Pattern failed to parse, error: 'missing ): ('
+
+# regexp_extract reports no match rather than throwing on an invalid pattern
+query II
+SELECT id, regexp_extract(s, p) FROM bad ORDER BY id
+----
+1	a
+2	(empty)
+3	a
+
+# TRY retries rows using cached invalid patterns without losing valid results
+query IIII
+SELECT count(TRY(regexp_matches(s, p))), count(TRY(regexp_full_match(s, p))),
+       count(TRY(regexp_replace(s, p, 'X'))), count(TRY(regexp_extract_all(s, p)))
+FROM bad, range(2000)
+----
+4000	4000	4000	4000
+
+# capture buffers follow cached patterns when TRY retries across vector boundaries
+query II
+SELECT count(TRY(regexp_extract_all(s, p, 2))), sum(len(TRY(regexp_extract_all(s, p, 2))))
+FROM caps, range(1000)
+----
+4000	6000

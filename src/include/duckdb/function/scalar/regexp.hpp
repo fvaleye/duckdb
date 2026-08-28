@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include "duckdb/common/vector.hpp"
 #include "duckdb/function/function_set.hpp"
 #include "re2/re2.h"
 #include "duckdb/function/built_in_functions.hpp"
@@ -187,6 +188,26 @@ struct RegexLocalState : public FunctionLocalState {
 	RegexStringPieceArgs group_buffer;
 };
 
+//! Per-thread cache of compiled patterns for the non-constant pattern path
+struct RegexpPatternCacheLocalState : public FunctionLocalState {
+	//! Same bound as PostgreSQL's MAX_CACHED_RES: a pattern stays cached as long as it recurs within this many lookups
+	static constexpr idx_t MAX_CACHED_PATTERNS = 32;
+
+	//! Options are fixed at bind time, so the pattern string alone identifies an entry
+	explicit RegexpPatternCacheLocalState(const duckdb_re2::RE2::Options &options_p) : options(options_p) {
+		cache.reserve(MAX_CACHED_PATTERNS);
+	}
+
+	//! Returns the compiled pattern, invalid ones included so callers check ok(); valid until the next call
+	duckdb_re2::RE2 &GetOrCompile(const string_t &pattern);
+
+private:
+	duckdb_re2::RE2::Options options;
+	//! Most recently used first, like PostgreSQL's RE_compile_and_cache
+	vector<unique_ptr<duckdb_re2::RE2>> cache;
+};
+
+//! Returns a RegexLocalState for a constant pattern and a RegexpPatternCacheLocalState otherwise
 unique_ptr<FunctionLocalState> RegexInitLocalState(ExpressionState &state, const BoundFunctionExpression &expr,
                                                    FunctionData *bind_data);
 unique_ptr<FunctionData> RegexpMatchesBind(BindScalarFunctionInput &input);

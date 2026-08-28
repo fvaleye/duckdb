@@ -1,0 +1,18 @@
+# name: benchmark/micro/string/regexp_extract_all_dynamic.benchmark
+# description: regexp_extract_all with a pattern column holding a handful of distinct patterns
+# group: [string]
+
+name Regexp Extract All Dynamic Pattern
+group string
+
+load
+CREATE TABLE regex_data AS
+SELECT 'string number ' || i AS s,
+       CASE i % 4 WHEN 0 THEN '[0-9]+' WHEN 1 THEN '[a-z]+' WHEN 2 THEN 'num[a-z]*' ELSE '^[0-9]+$' END AS p
+FROM range(10000000) t(i);
+
+run
+SELECT SUM(len(regexp_extract_all(s, p))) FROM regex_data
+
+result I
+10000000

@@ -5,6 +5,7 @@
 #include "duckdb/common/vector/struct_vector.hpp"
 #include "duckdb/function/scalar/regexp.hpp"
 
+#include "duckdb/common/algorithm.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/vector_operations/binary_executor.hpp"
 #include "duckdb/common/vector_operations/ternary_executor.hpp"
@@ -58,13 +59,33 @@ bool RegexpBaseBindData::Equals(const FunctionData &other_p) const {
 	       RegexOptionsEquals(options, other.options);
 }
 
+duckdb_re2::RE2 &RegexpPatternCacheLocalState::GetOrCompile(const string_t &pattern) {
+	// ponytail: scan at most 32 entries; use indexed lookup if miss-heavy workloads dominate.
+	for (idx_t i = 0; i < cache.size(); i++) {
+		const auto &cached_pattern = cache[i]->pattern();
+		if (cached_pattern.size() != pattern.GetSize() ||
+		    memcmp(cached_pattern.data(), pattern.GetData(), pattern.GetSize()) != 0) {
+			continue;
+		}
+		if (i > 0) {
+			std::rotate(cache.begin(), cache.begin() + i, cache.begin() + i + 1);
+		}
+		return *cache[0];
+	}
+	if (cache.size() == MAX_CACHED_PATTERNS) {
+		cache.pop_back();
+	}
+	cache.insert(cache.begin(), make_uniq<duckdb_re2::RE2>(CreateStringPiece(pattern), options));
+	return *cache[0];
+}
+
 unique_ptr<FunctionLocalState> RegexInitLocalState(ExpressionState &state, const BoundFunctionExpression &expr,
                                                    FunctionData *bind_data) {
 	auto &info = bind_data->Cast<RegexpBaseBindData>();
 	if (info.constant_pattern) {
 		return make_uniq<RegexLocalState>(info);
 	}
-	return nullptr;
+	return make_uniq<RegexpPatternCacheLocalState>(info.options);
 }
 
 //===--------------------------------------------------------------------===//
@@ -139,9 +160,10 @@ static void RegexpMatchesFunction(DataChunk &args, ExpressionState &state, Vecto
 			return OP::Operation(CreateStringPiece(input), lstate.constant_pattern);
 		});
 	} else {
+		auto &lstate = ExecuteFunctionState::GetFunctionState(state)->Cast<RegexpPatternCacheLocalState>();
 		BinaryExecutor::Execute<string_t, string_t, bool>(strings, patterns, result,
 		                                                  [&](string_t input, string_t pattern) {
-			                                                  RE2 re(CreateStringPiece(pattern), info.options);
+			                                                  auto &re = lstate.GetOrCompile(pattern);
 			                                                  if (!re.ok()) {
 				                                                  throw InvalidInputException(re.error());
 			                                                  }
@@ -210,9 +232,10 @@ static void RegexReplaceFunction(DataChunk &args, ExpressionState &state, Vector
 			    return heap.AddString(sstring);
 		    });
 	} else {
+		auto &lstate = ExecuteFunctionState::GetFunctionState(state)->Cast<RegexpPatternCacheLocalState>();
 		TernaryExecutor::Execute<string_t, string_t, string_t, string_t>(
 		    strings, patterns, replaces, result, [&](string_t input, string_t pattern, string_t replace) {
-			    RE2 re(CreateStringPiece(pattern), info.options);
+			    auto &re = lstate.GetOrCompile(pattern);
 			    if (!re.ok()) {
 				    throw InvalidInputException(re.error());
 			    }
@@ -273,9 +296,10 @@ static void RegexExtractFunction(DataChunk &args, ExpressionState &state, Vector
 			return ExtractCaptureGroup(input, re, info.group_index, info.no_match_returns_input);
 		});
 	} else {
+		auto &lstate = ExecuteFunctionState::GetFunctionState(state)->Cast<RegexpPatternCacheLocalState>();
 		BinaryExecutor::Execute<string_t, string_t, string_t>(
 		    strings, patterns, result, [&](string_t input, string_t pattern) {
-			    RE2 re(CreateStringPiece(pattern), info.options);
+			    auto &re = lstate.GetOrCompile(pattern);
 			    return ExtractCaptureGroup(input, re, info.group_index, info.no_match_returns_input);
 		    });
 	}
@@ -287,7 +311,7 @@ static void RegexExtractFunction(DataChunk &args, ExpressionState &state, Vector
 static void RegexExtractStructFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	// This function assumes a constant pre-compiled pattern stored in the local state.
 	// If a non-constant pattern reaches here it indicates a binder bug. Return a clean error instead of crashing.
-	if (!ExecuteFunctionState::GetFunctionState(state)) {
+	if (!state.expr.Cast<BoundFunctionExpression>().BindInfo()->Cast<RegexpBaseBindData>().constant_pattern) {
 		throw InternalException("REGEXP_EXTRACT struct variant executed without constant pattern state");
 	}
 	auto &lstate = ExecuteFunctionState::GetFunctionState(state)->Cast<RegexLocalState>();

@@ -38,17 +38,6 @@ struct ConstantRegexpStringSplit {
 	}
 };
 
-struct RegexpStringSplit {
-	static idx_t Find(const char *input_data, idx_t input_size, const char *delim_data, idx_t delim_size,
-	                  idx_t &match_size, void *data) {
-		duckdb_re2::RE2 regex(duckdb_re2::StringPiece(delim_data, delim_size));
-		if (!regex.ok()) {
-			throw InvalidInputException(regex.error());
-		}
-		return ConstantRegexpStringSplit::Find(input_data, input_size, delim_data, delim_size, match_size, &regex);
-	}
-};
-
 struct StringSplitter {
 	template <class OP, class CB>
 	static idx_t Split(string_t input, string_t delim, void *data, CB &&emit) {
@@ -87,8 +76,8 @@ struct StringSplitter {
 	}
 };
 
-template <class OP>
-void StringSplitExecutor(DataChunk &args, ExpressionState &state, Vector &result, void *data = nullptr) {
+template <class OP, class FUNC>
+void StringSplitExecutor(DataChunk &args, ExpressionState &state, Vector &result, FUNC &&get_split_data) {
 	auto input_entries = args.data[0].Values<string_t>();
 	auto delim_entries = args.data[1].Values<string_t>();
 
@@ -104,13 +93,14 @@ void StringSplitExecutor(DataChunk &args, ExpressionState &state, Vector &result
 		}
 		auto delim_entry = delim_entries[i];
 		auto list = list_writer.WriteDynamicList();
-		if (!delim_entry.IsValid()) {
-			// delim is NULL: copy the complete entry
+		if (!delim_entry.IsValid() || input_entry.GetValue().GetSize() == 0) {
+			// No delimiter matching is needed: copy the complete entry
 			list.WriteElement().WriteStringRef(input_entry.GetValue());
 			continue;
 		}
 		StringSplitter::Split<OP>(
-		    input_entry.GetValue(), delim_entry.GetValue(), data, [&](const char *split_data, idx_t split_size) {
+		    input_entry.GetValue(), delim_entry.GetValue(), get_split_data(delim_entry.GetValue()),
+		    [&](const char *split_data, idx_t split_size) {
 			    list.WriteElement().WriteStringRef(string_t(split_data, UnsafeNumericCast<uint32_t>(split_size)));
 		    });
 	}
@@ -119,7 +109,7 @@ void StringSplitExecutor(DataChunk &args, ExpressionState &state, Vector &result
 }
 
 void StringSplitFunction(DataChunk &args, ExpressionState &state, Vector &result) {
-	StringSplitExecutor<RegularStringSplit>(args, state, result, nullptr);
+	StringSplitExecutor<RegularStringSplit>(args, state, result, [](string_t) { return nullptr; });
 }
 
 void StringSplitRegexFunction(DataChunk &args, ExpressionState &state, Vector &result) {
@@ -128,10 +118,17 @@ void StringSplitRegexFunction(DataChunk &args, ExpressionState &state, Vector &r
 	if (info.constant_pattern) {
 		// fast path: pre-compiled regex
 		auto &lstate = ExecuteFunctionState::GetFunctionState(state)->Cast<RegexLocalState>();
-		StringSplitExecutor<ConstantRegexpStringSplit>(args, state, result, &lstate.constant_pattern);
+		StringSplitExecutor<ConstantRegexpStringSplit>(args, state, result,
+		                                               [&](string_t) { return &lstate.constant_pattern; });
 	} else {
-		// slow path: have to re-compile regex for every row
-		StringSplitExecutor<RegexpStringSplit>(args, state, result);
+		auto &lstate = ExecuteFunctionState::GetFunctionState(state)->Cast<RegexpPatternCacheLocalState>();
+		StringSplitExecutor<ConstantRegexpStringSplit>(args, state, result, [&](string_t delim) {
+			auto &regex = lstate.GetOrCompile(delim);
+			if (!regex.ok()) {
+				throw InvalidInputException(regex.error());
+			}
+			return &regex;
+		});
 	}
 }
 

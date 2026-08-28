@@ -1,0 +1,19 @@
+# name: benchmark/micro/list/string_split_regexp_dynamic.benchmark
+# description: str_split_regex with a pattern column holding a handful of distinct patterns
+# group: [list]
+
+name String Split Regexp Dynamic Pattern
+group micro
+subgroup list
+
+load
+CREATE TABLE regex_data AS
+SELECT 'string number ' || i AS s,
+       CASE i % 4 WHEN 0 THEN '[0-9]+' WHEN 1 THEN '[a-z]+' WHEN 2 THEN 'num[a-z]*' ELSE '^[0-9]+$' END AS p
+FROM range(1000000) t(i);
+
+run
+SELECT SUM(len(str_split_regex(s, p))) FROM regex_data
+
+result I
+2000000

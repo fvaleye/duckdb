@@ -1,0 +1,17 @@
+# name: benchmark/micro/list/string_split_regexp_dynamic_long_pattern.benchmark
+# description: str_split_regex with a long dynamic pattern and many delimiters in each row
+# group: [list]
+
+name String Split Regexp Dynamic Long Pattern
+group micro
+subgroup list
+
+load
+CREATE TABLE regex_data AS
+SELECT repeat('a', 10000) AS s, repeat('a|', 2500) || 'a' AS p FROM range(10);
+
+run
+SELECT SUM(len(str_split_regex(s, p))) FROM regex_data
+
+result I
+100010

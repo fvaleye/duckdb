@@ -135,3 +135,72 @@ statement error
 select TRANSLATE(1, 2, 3, 4)
 ----
 <REGEX>:.*Binder Error.*No function matches.*
+
+# test translate with constant arguments
+
+statement ok
+CREATE TABLE translate_rows(id INTEGER, s VARCHAR, needle VARCHAR, thread VARCHAR);
+
+statement ok
+INSERT INTO translate_rows VALUES
+    (1, 'abcabc', 'abc', 'XYZ'),
+    (2, NULL, 'abc', 'XYZ'),
+    (3, '', 'abc', 'XYZ'),
+    (4, 'ÄÖÜ äöü', 'ÄÖÜ', 'aou'),
+    (5, 'a1b2c3', '0123456789', ''),
+    (6, 'aaa', 'aab', 'XY');
+
+# constant needle and thread
+query IT
+select id, TRANSLATE(s, 'abc', 'XYZ') from translate_rows order by id
+----
+1	XYZXYZ
+2	NULL
+3	(empty)
+4	ÄÖÜ äöü
+5	X1Y2Z3
+6	XXX
+
+# non-constant needle and thread take the ternary path
+query IT
+select id, TRANSLATE(s, needle, thread) from translate_rows order by id
+----
+1	XYZXYZ
+2	NULL
+3	(empty)
+4	aou äöü
+5	abc
+6	XXX
+
+# an empty thread deletes the needle codepoints
+query IT
+select id, TRANSLATE(s, '0123456789', '') from translate_rows order by id
+----
+1	abcabc
+2	NULL
+3	(empty)
+4	ÄÖÜ äöü
+5	abc
+6	aaa
+
+# a NULL argument propagates NULL
+query I
+select count(*) from translate_rows where TRANSLATE(s, NULL, 'X') is null
+----
+6
+
+query I
+select count(*) from translate_rows where TRANSLATE(s, 'a', NULL) is null
+----
+6
+
+# a surplus thread is ignored, a repeated needle keeps its first mapping
+query T
+select TRANSLATE('abc', 'a', 'XYZ')
+----
+Xbc
+
+query T
+select TRANSLATE('abc', 'aab', 'XYZ')
+----
+XZc

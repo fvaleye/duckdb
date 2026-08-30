@@ -1,0 +1,15 @@
+# name: benchmark/micro/string/translate_constant.benchmark
+# description: TRANSLATE with a constant needle and thread
+# group: [string]
+
+name Translate Constant Mapping
+group string
+
+load
+CREATE TABLE strings AS SELECT 'the quick brown fox jumps over the lazy dog ' || i AS s FROM range(0, 2000000) tbl(i);
+
+run
+SELECT COUNT(TRANSLATE(s, 'abcdefghijklmnopqrstuvwxyz0123456789', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ9876543210')) FROM strings;
+
+result I
+2000000

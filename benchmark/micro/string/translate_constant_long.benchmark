@@ -1,0 +1,15 @@
+# name: benchmark/micro/string/translate_constant_long.benchmark
+# description: TRANSLATE with a long constant needle and thread, where the mapping is most expensive to build
+# group: [string]
+
+name Translate Constant Mapping (Long)
+group string
+
+load
+CREATE TABLE strings AS SELECT 'the quick brown fox jumps over the lazy dog ' || i AS s FROM range(0, 2000000) tbl(i);
+
+run
+SELECT COUNT(TRANSLATE(s, '_-.,;:!?/\|()[]{}<>@#$%^&*+=~`''"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', '________________________________ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz9876543210')) FROM strings;
+
+result I
+2000000

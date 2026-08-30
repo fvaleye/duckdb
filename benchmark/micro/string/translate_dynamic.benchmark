@@ -1,0 +1,15 @@
+# name: benchmark/micro/string/translate_dynamic.benchmark
+# description: TRANSLATE with a per-row needle and thread, which keeps the row-at-a-time path
+# group: [string]
+
+name Translate Dynamic Mapping
+group string
+
+load
+CREATE TABLE strings AS SELECT 'the quick brown fox jumps over the lazy dog ' || i AS s, 'abc' || (i % 10) AS needle, 'XYZ' || (i % 10) AS thread FROM range(0, 2000000) tbl(i);
+
+run
+SELECT COUNT(TRANSLATE(s, needle, thread)) FROM strings;
+
+result I
+2000000

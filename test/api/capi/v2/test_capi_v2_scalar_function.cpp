@@ -1228,6 +1228,336 @@ TEST_CASE("V2 function bind: null arguments", "[capi_v2][scalar_function]") {
 	        DUCKDB_V2_ERROR_INPUT_INVALID);
 }
 
+namespace {
+
+struct ContextExplainInput {
+	const char *sql = "SELECT 42";
+	const duckdb_v2_identifier_t *names = nullptr;
+	const duckdb_v2_value_handle *values = nullptr;
+	idx_t count = 0;
+};
+
+void DestroyContextExplain(void *data) {
+	auto plan = static_cast<duckdb_v2_value_handle>(data);
+	duckdb_v2_value_destroy(&plan);
+}
+
+void ContextExplainBind(duckdb_v2_function_bind_info_handle info, duckdb_v2_scalar_function_bind_info_handle result,
+                        duckdb_v2_context_handle context, duckdb_v2_error_info_handle *err) {
+	void *user_data = nullptr;
+	if (duckdb_v2_function_bind_get_user_data(info, &user_data, err) != DUCKDB_V2_ERROR_NONE) {
+		return;
+	}
+	auto &input = *static_cast<ContextExplainInput *>(user_data);
+	duckdb_v2_value_handle plan = nullptr;
+	auto rc = duckdb_v2_context_explain_json(context, input.sql, input.names, input.values, input.count, &plan, err);
+	if (rc != DUCKDB_V2_ERROR_NONE) {
+		SetErrorInfo(err, rc, "Could not explain the statement");
+		return;
+	}
+	duckdb_v2_opaque bind_data = {plan, DestroyContextExplain, nullptr};
+	if (duckdb_v2_scalar_function_bind_set_bind_data(result, &bind_data, err) != DUCKDB_V2_ERROR_NONE) {
+		duckdb_v2_value_destroy(&plan);
+	}
+}
+
+void ContextExplainExec(duckdb_v2_scalar_function_exec_info_handle info, duckdb_v2_context_handle,
+                        duckdb_v2_error_info_handle *err) {
+	void *bind_data = nullptr;
+	duckdb_v2_vector_handle output = nullptr;
+	idx_t count = 0;
+	if (duckdb_v2_scalar_function_exec_get_bind_data(info, &bind_data, err) != DUCKDB_V2_ERROR_NONE ||
+	    duckdb_v2_scalar_function_exec_get_result(info, &output, err) != DUCKDB_V2_ERROR_NONE ||
+	    duckdb_v2_scalar_function_exec_get_row_count(info, &count, err) != DUCKDB_V2_ERROR_NONE ||
+	    duckdb_v2_vector_set_size(output, count, err) != DUCKDB_V2_ERROR_NONE) {
+		return;
+	}
+	auto plan = static_cast<duckdb_v2_value_handle>(bind_data);
+	for (idx_t row = 0; row < count; row++) {
+		if (duckdb_v2_vector_set_value(output, row, plan, err) != DUCKDB_V2_ERROR_NONE) {
+			break;
+		}
+	}
+}
+
+void RegisterContextExplain(EnvFixture &fx, ContextExplainInput &input) {
+	auto function = MakeScalar(fx.conn, "context_explain_test");
+	auto varchar = MakeType(fx.factory, DUCKDB_V2_LOGICAL_TYPE_ID_VARCHAR);
+	REQUIRE(duckdb_v2_function_signature_set_return_type(SigOf(function), varchar, nullptr) == DUCKDB_V2_ERROR_NONE);
+	duckdb_v2_logical_type_destroy(&varchar);
+	duckdb_v2_opaque user_data = {&input, nullptr, nullptr};
+	REQUIRE(duckdb_v2_scalar_function_set_user_data(function, &user_data, nullptr) == DUCKDB_V2_ERROR_NONE);
+	REQUIRE(duckdb_v2_scalar_function_set_property(function, DUCKDB_V2_FUNCTION_PROPERTY_STABILITY,
+	                                               DUCKDB_V2_FUNCTION_PROPERTY_STABILITY_VOLATILE,
+	                                               nullptr) == DUCKDB_V2_ERROR_NONE);
+	REQUIRE(duckdb_v2_scalar_function_set_exec_callback(function, ContextExplainExec, nullptr) == DUCKDB_V2_ERROR_NONE);
+	REQUIRE(duckdb_v2_scalar_function_set_bind_callback(function, ContextExplainBind, nullptr) == DUCKDB_V2_ERROR_NONE);
+	REQUIRE(duckdb_v2_connection_register_scalar_function(fx.conn, function, nullptr) == DUCKDB_V2_ERROR_NONE);
+	duckdb_v2_scalar_function_destroy(&function);
+}
+
+std::string QueryExplainText(duckdb_v2_connection_handle conn, const char *sql, idx_t column = 0) {
+	QueryResult result;
+	REQUIRE(Query(conn, sql, &result) == DUCKDB_V2_ERROR_NONE);
+	auto chunk = StepChunk(result);
+	REQUIRE(chunk != nullptr);
+	duckdb_v2_vector_handle vector = nullptr;
+	duckdb_v2_value_handle value = nullptr;
+	REQUIRE(duckdb_v2_data_chunk_get_vector(chunk, column, &vector, nullptr) == DUCKDB_V2_ERROR_NONE);
+	REQUIRE(duckdb_v2_vector_get_value(vector, 0, &value, nullptr) == DUCKDB_V2_ERROR_NONE);
+	duckdb_v2_data_chunk_destroy(&chunk);
+	return ConsumeValue<std::string>(value);
+}
+
+} // namespace
+
+TEST_CASE("V2 context: explain inside a callback uses the caller's transaction", "[capi_v2][context_explain]") {
+	EnvFixture fx;
+	ContextExplainInput input;
+	RegisterContextExplain(fx, input);
+	ExecSQL(fx.conn, "CREATE SCHEMA explain_schema");
+	ExecSQL(fx.conn, "USE explain_schema");
+	ExecSQL(fx.conn, "BEGIN");
+	ExecSQL(fx.conn, "CREATE TABLE pending AS SELECT 1 AS i");
+	ExecSQL(fx.conn, "CREATE TEMP TABLE local_rows AS SELECT 2 AS j");
+	input.sql = "SELECT i, j FROM pending, local_rows WHERE i + j > 0";
+	auto expected =
+	    QueryExplainText(fx.conn, "EXPLAIN (FORMAT JSON) SELECT i, j FROM pending, local_rows WHERE i + j > 0", 1);
+	REQUIRE(QueryExplainText(fx.conn, "SELECT context_explain_test()") == expected);
+	ExecSQL(fx.conn, "SET enable_profiling = 'no_output'");
+	ExecSQL(fx.conn, "SET explain_output = 'optimized_only'");
+	REQUIRE(QueryExplainText(fx.conn, "SELECT context_explain_test()") == expected);
+	ExecSQL(fx.conn, "PRAGMA disable_optimizer");
+	ExecSQL(fx.conn, "SET explain_output = 'physical_only'");
+	expected =
+	    QueryExplainText(fx.conn, "EXPLAIN (FORMAT JSON) SELECT i, j FROM pending, local_rows WHERE i + j > 0", 1);
+	REQUIRE(QueryExplainText(fx.conn, "SELECT context_explain_test()") == expected);
+	REQUIRE(QueryI32(fx.conn, "SELECT count(*)::INTEGER FROM range(5000) WHERE length(context_explain_test()) > 0") ==
+	        5000);
+	REQUIRE(QueryI32(fx.conn, "SELECT (i + j)::INTEGER FROM pending, local_rows") == 3);
+	ExecSQL(fx.conn, "ROLLBACK");
+	REQUIRE(RunSql(fx.conn, "SELECT * FROM pending") != DUCKDB_V2_ERROR_NONE);
+	REQUIRE(RunSql(fx.conn, "SELECT * FROM local_rows") != DUCKDB_V2_ERROR_NONE);
+}
+
+TEST_CASE("V2 context: explain binds parameters before optimizing", "[capi_v2][context_explain]") {
+	EnvFixture fx;
+	ContextExplainInput input;
+	RegisterContextExplain(fx, input);
+	ExecSQL(fx.conn, "CREATE TABLE explain_rows AS SELECT i FROM range(10) t(i)");
+	auto parameter = MakeInt32Value(fx.factory, 4);
+	auto name = Ident("minimum");
+	input.values = &parameter;
+	input.count = 1;
+	SECTION("positional") {
+		input.sql = "SELECT i FROM explain_rows WHERE i > $1";
+	}
+	SECTION("named") {
+		input.sql = "SELECT i FROM explain_rows WHERE i > $minimum";
+		input.names = &name;
+	}
+	auto expected = QueryExplainText(fx.conn, "EXPLAIN (FORMAT JSON) SELECT i FROM explain_rows WHERE i > 4", 1);
+	REQUIRE(QueryExplainText(fx.conn, "SELECT context_explain_test()") == expected);
+	duckdb_v2_value_destroy(&parameter);
+
+	input.count = 0;
+	REQUIRE(RunSql(fx.conn, "SELECT context_explain_test()") != DUCKDB_V2_ERROR_NONE);
+	input.sql = "SELECT 42";
+	REQUIRE(QueryExplainText(fx.conn, "SELECT context_explain_test()").find("PROJECTION") != std::string::npos);
+}
+
+TEST_CASE("V2 context: explain does not execute the statement", "[capi_v2][context_explain]") {
+	EnvFixture fx;
+	ContextExplainInput input;
+	RegisterContextExplain(fx, input);
+	ExecSQL(fx.conn, "CREATE TABLE untouched(i INTEGER)");
+	ExecSQL(fx.conn, "CREATE SEQUENCE explain_sequence");
+	input.sql = "INSERT INTO untouched VALUES (42)";
+	REQUIRE(QueryExplainText(fx.conn, "SELECT context_explain_test()").find("INSERT") != std::string::npos);
+	input.sql = "EXPLAIN ANALYZE INSERT INTO untouched VALUES (42)";
+	REQUIRE(QueryExplainText(fx.conn, "SELECT context_explain_test()").find("EXPLAIN_ANALYZE") != std::string::npos);
+	REQUIRE(QueryI32(fx.conn, "SELECT count(*)::INTEGER FROM untouched") == 0);
+	input.sql = "SELECT nextval('explain_sequence')";
+	REQUIRE(QueryExplainText(fx.conn, "SELECT context_explain_test()").find("PROJECTION") != std::string::npos);
+	REQUIRE(QueryI32(fx.conn, "SELECT nextval('explain_sequence')::INTEGER") == 1);
+}
+
+TEST_CASE("V2 context: explain rejects invalid input and recovers", "[capi_v2][context_explain]") {
+	EnvFixture fx;
+	ContextExplainInput input;
+	RegisterContextExplain(fx, input);
+	ExecSQL(fx.conn, "CREATE TABLE untouched(i INTEGER)");
+	for (auto sql : {"", ";;", "SELECT FROM", "SELECT * FROM nonexistent",
+	                 "INSERT INTO untouched VALUES (1); SELECT * FROM untouched"}) {
+		input.sql = sql;
+		REQUIRE(RunSql(fx.conn, "SELECT context_explain_test()") != DUCKDB_V2_ERROR_NONE);
+		REQUIRE(QueryI32(fx.conn, "SELECT count(*)::INTEGER FROM untouched") == 0);
+	}
+	input.sql = nullptr;
+	REQUIRE(RunSql(fx.conn, "SELECT context_explain_test()") == DUCKDB_V2_ERROR_INPUT_INVALID);
+	input.sql = "SELECT $1";
+	input.count = 1;
+	REQUIRE(RunSql(fx.conn, "SELECT context_explain_test()") == DUCKDB_V2_ERROR_INPUT_INVALID);
+	duckdb_v2_value_handle parameter = nullptr;
+	input.values = &parameter;
+	REQUIRE(RunSql(fx.conn, "SELECT context_explain_test()") == DUCKDB_V2_ERROR_INPUT_INVALID);
+	parameter = MakeInt32Value(fx.factory, 42);
+	auto malformed_name = duckdb_v2_identifier_t {nullptr, 3};
+	input.names = &malformed_name;
+	REQUIRE(RunSql(fx.conn, "SELECT context_explain_test()") == DUCKDB_V2_ERROR_INPUT_INVALID);
+	input.names = nullptr;
+	input.sql = "SELECT 42";
+	REQUIRE(RunSql(fx.conn, "SELECT context_explain_test()") == DUCKDB_V2_ERROR_INPUT_INVALID);
+	duckdb_v2_value_destroy(&parameter);
+	input.count = 0;
+	REQUIRE(QueryExplainText(fx.conn, "SELECT context_explain_test()").find("PROJECTION") != std::string::npos);
+
+	duckdb_v2_value_handle plan = nullptr;
+	REQUIRE(duckdb_v2_context_explain_json(nullptr, "SELECT 42", nullptr, nullptr, 0, &plan, nullptr) ==
+	        DUCKDB_V2_ERROR_INPUT_INVALID);
+	REQUIRE(plan == nullptr);
+	REQUIRE(duckdb_v2_context_explain_json(nullptr, "SELECT 42", nullptr, nullptr, 0, nullptr, nullptr) ==
+	        DUCKDB_V2_ERROR_INPUT_INVALID);
+}
+
+TEST_CASE("V2 context: explain rejects a view that recursively reaches it", "[capi_v2][context_explain]") {
+	EnvFixture fx;
+	ContextExplainInput input;
+	RegisterContextExplain(fx, input);
+	ExecSQL(fx.conn, "CREATE VIEW recursive_plan AS SELECT 'base' AS plan");
+	input.sql = "SELECT * FROM recursive_plan";
+	ExecSQL(fx.conn, "CREATE OR REPLACE VIEW recursive_plan AS SELECT context_explain_test() AS plan");
+	REQUIRE(RunSql(fx.conn, "SELECT * FROM recursive_plan") == DUCKDB_V2_ERROR_INPUT_INVALID);
+	input.sql = "SELECT 42";
+	REQUIRE(QueryExplainText(fx.conn, "SELECT context_explain_test()").find("PROJECTION") != std::string::npos);
+}
+
+TEST_CASE("V2 context: explain refreshes prepared calls", "[capi_v2][context_explain]") {
+	EnvFixture fx;
+	ContextExplainInput input;
+	RegisterContextExplain(fx, input);
+	ExecSQL(fx.conn, "CREATE SCHEMA first_schema");
+	ExecSQL(fx.conn, "CREATE SCHEMA second_schema");
+	ExecSQL(fx.conn, "SET schema='first_schema'");
+	ExecSQL(fx.conn, "CREATE TABLE explain_rows AS SELECT i FROM range(10) t(i)");
+	input.sql = "SELECT * FROM explain_rows";
+	ExecSQL(fx.conn, "PREPARE inspection AS SELECT context_explain_test()");
+	SECTION("schema changes") {
+		ExecSQL(fx.conn, "CREATE TABLE second_schema.explain_rows(i BIGINT)");
+		ExecSQL(fx.conn, "SET schema='second_schema'");
+		REQUIRE(QueryExplainText(fx.conn, "EXECUTE inspection") ==
+		        QueryExplainText(fx.conn, "EXPLAIN (FORMAT JSON) SELECT * FROM explain_rows", 1));
+	}
+	SECTION("statistics change without DDL") {
+		ExecSQL(fx.conn, "INSERT INTO explain_rows SELECT * FROM range(1000)");
+		REQUIRE(QueryExplainText(fx.conn, "EXECUTE inspection") ==
+		        QueryExplainText(fx.conn, "EXPLAIN (FORMAT JSON) SELECT * FROM explain_rows", 1));
+	}
+	SECTION("table is dropped") {
+		ExecSQL(fx.conn, "DROP TABLE explain_rows");
+		REQUIRE(RunSql(fx.conn, "EXECUTE inspection") != DUCKDB_V2_ERROR_NONE);
+	}
+}
+
+TEST_CASE("V2 context: explain in prepared EXECUTE arguments requires rebinding", "[capi_v2][context_explain]") {
+	EnvFixture fx;
+	ContextExplainInput input;
+	RegisterContextExplain(fx, input);
+	ExecSQL(fx.conn, "PREPARE passthrough AS SELECT $1::VARCHAR");
+	duckdb_v2_statement_iterator_handle iterator = nullptr;
+	REQUIRE(duckdb_v2_parse_sql(fx.conn, "EXECUTE passthrough(context_explain_test())", true, &iterator, nullptr) ==
+	        DUCKDB_V2_ERROR_NONE);
+	duckdb_v2_sql_statement_handle statement = nullptr;
+	REQUIRE(duckdb_v2_statement_iterator_next(iterator, &statement, nullptr) == DUCKDB_V2_ERROR_NONE);
+	duckdb_v2_statement_iterator_destroy(&iterator);
+	duckdb_v2_prepared_statement_handle prepared = nullptr;
+	auto rc = duckdb_v2_prepared_statement_create(fx.conn, statement, false, &prepared, nullptr);
+	duckdb_v2_sql_statement_destroy(&statement);
+	REQUIRE(rc == DUCKDB_V2_ERROR_NONE);
+	bool reuses_plan = true;
+	rc = duckdb_v2_prepared_statement_reuses_plan(prepared, &reuses_plan, nullptr);
+	duckdb_v2_prepared_statement_destroy(&prepared);
+	REQUIRE(rc == DUCKDB_V2_ERROR_NONE);
+	REQUIRE_FALSE(reuses_plan);
+}
+
+TEST_CASE("V2 context: explain rejects binding reached during execution", "[capi_v2][context_explain]") {
+	EnvFixture fx;
+	if (QueryI32(fx.conn,
+	             "SELECT count(*)::INTEGER FROM duckdb_extensions() WHERE extension_name='json' AND installed") == 0) {
+		return;
+	}
+	ExecSQL(fx.conn, "LOAD json");
+	ContextExplainInput input;
+	RegisterContextExplain(fx, input);
+	ExecSQL(fx.conn, "SET threads=2");
+	ExecSQL(fx.conn, "SET enable_profiling='no_output'");
+	REQUIRE(QueryI32(fx.conn, "SELECT count(*)::INTEGER FROM (SELECT json_serialize_plan("
+	                          "'SELECT context_explain_test(), ' || i::VARCHAR, optimize := true) AS plan "
+	                          "FROM range(2) t(i)) WHERE json_extract_string(plan, '$.error')='true'") == 2);
+	REQUIRE(QueryExplainText(fx.conn, "SELECT context_explain_test()").find("PROJECTION") != std::string::npos);
+}
+
+TEST_CASE("V2 context: explain rejects statements requiring expansion", "[capi_v2][context_explain]") {
+	EnvFixture fx;
+	ContextExplainInput input;
+	RegisterContextExplain(fx, input);
+	input.sql = "PIVOT (SELECT 1 a, 2 b) ON a USING sum(b)";
+	REQUIRE(RunSql(fx.conn, "SELECT context_explain_test()") == DUCKDB_V2_ERROR_INPUT_INVALID);
+	input.sql = "PIVOT (SELECT 1 a, 2 b) ON a IN (1) USING sum(b)";
+	REQUIRE(QueryExplainText(fx.conn, "SELECT context_explain_test()").find("PROJECTION") != std::string::npos);
+}
+
+namespace {
+
+void ContextExplainDuringInit(duckdb_v2_scalar_function_init_info_handle, duckdb_v2_context_handle context,
+                              duckdb_v2_error_info_handle *err) {
+	duckdb_v2_value_handle plan = nullptr;
+	auto rc = duckdb_v2_context_explain_json(context, "SELECT 42", nullptr, nullptr, 0, &plan, err);
+	duckdb_v2_value_destroy(&plan);
+	if (rc != DUCKDB_V2_ERROR_NONE) {
+		SetErrorInfo(err, rc, "Cannot plan during initialization");
+	}
+}
+
+void ContextExplainDuringExec(duckdb_v2_scalar_function_exec_info_handle info, duckdb_v2_context_handle context,
+                              duckdb_v2_error_info_handle *err) {
+	duckdb_v2_value_handle plan = nullptr;
+	auto rc = duckdb_v2_context_explain_json(context, "SELECT 42", nullptr, nullptr, 0, &plan, err);
+	duckdb_v2_value_destroy(&plan);
+	if (rc != DUCKDB_V2_ERROR_NONE) {
+		SetErrorInfo(err, rc, "Cannot plan during execution");
+	} else {
+		Const42Exec(info, context, err);
+	}
+}
+
+} // namespace
+
+TEST_CASE("V2 context: explain rejects init and execution callbacks", "[capi_v2][context_explain]") {
+	EnvFixture fx;
+	auto function = MakeScalar(fx.conn, "explain_during_exec");
+	auto integer = MakeType(fx.factory, DUCKDB_V2_LOGICAL_TYPE_ID_INTEGER);
+	REQUIRE(duckdb_v2_function_signature_set_return_type(SigOf(function), integer, nullptr) == DUCKDB_V2_ERROR_NONE);
+	duckdb_v2_logical_type_destroy(&integer);
+	REQUIRE(duckdb_v2_scalar_function_set_property(function, DUCKDB_V2_FUNCTION_PROPERTY_STABILITY,
+	                                               DUCKDB_V2_FUNCTION_PROPERTY_STABILITY_VOLATILE,
+	                                               nullptr) == DUCKDB_V2_ERROR_NONE);
+	SECTION("init") {
+		REQUIRE(duckdb_v2_scalar_function_set_init_callback(function, ContextExplainDuringInit, nullptr) ==
+		        DUCKDB_V2_ERROR_NONE);
+		REQUIRE(duckdb_v2_scalar_function_set_exec_callback(function, Const42Exec, nullptr) == DUCKDB_V2_ERROR_NONE);
+	}
+	SECTION("exec") {
+		REQUIRE(duckdb_v2_scalar_function_set_exec_callback(function, ContextExplainDuringExec, nullptr) ==
+		        DUCKDB_V2_ERROR_NONE);
+	}
+	REQUIRE(duckdb_v2_connection_register_scalar_function(fx.conn, function, nullptr) == DUCKDB_V2_ERROR_NONE);
+	duckdb_v2_scalar_function_destroy(&function);
+	REQUIRE(RunSql(fx.conn, "SELECT explain_during_exec()") == DUCKDB_V2_ERROR_INPUT_INVALID);
+	REQUIRE(QueryI32(fx.conn, "SELECT 42") == 42);
+}
+
 } // namespace test_capi_v2
 
 namespace test_capi_v2 {

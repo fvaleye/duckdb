@@ -300,6 +300,8 @@ public:
 
 	//! Returns the current executor
 	Executor &GetExecutor();
+	//! Whether a statement has reached execution, including executor initialization.
+	bool HasExecutor() const;
 
 	//! Return the current logger
 	Logger &GetLogger() const;

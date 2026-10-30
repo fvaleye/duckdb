@@ -416,7 +416,7 @@ static auto CV2TableBind(ClientContext &context, TableFunctionBindInput &input, 
 
 	CV2ErrorInfo err = {};
 	auto err_ptr = Convert(&err);
-	CV2CallbackContext callback_context(context);
+	CV2CallbackContext callback_context(context, input.binder);
 	info.bind_cb(Convert(&bind_info), Convert(&args), Convert(&callback_context), &err_ptr);
 
 	// Take ownership of whatever the callback set before reporting an error, so it is destroyed either way.

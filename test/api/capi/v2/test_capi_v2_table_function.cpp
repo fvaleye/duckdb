@@ -2280,4 +2280,55 @@ TEST_CASE("V2 table: named-only parameters and kwargs", "[capi_v2][table_functio
 	duckdb_v2_result_destroy(&result);
 }
 
+namespace {
+
+std::string context_table_plan;
+
+void ContextExplainTableBind(duckdb_v2_function_bind_info_handle info, duckdb_v2_table_function_bind_info_handle result,
+                             duckdb_v2_context_handle context, duckdb_v2_error_info_handle *err) {
+	duckdb_v2_value_handle plan = nullptr;
+	auto rc = duckdb_v2_context_explain_json(context, "SELECT i FROM explain_local", nullptr, nullptr, 0, &plan, err);
+	if (rc != DUCKDB_V2_ERROR_NONE) {
+		SetErrorInfo(err, rc, "Could not explain the statement");
+		return;
+	}
+	duckdb_v2_str text = {nullptr, 0};
+	rc = duckdb_v2_value_get_varchar(plan, &text, err);
+	if (rc == DUCKDB_V2_ERROR_NONE) {
+		context_table_plan = Convert(text);
+	}
+	duckdb_v2_value_destroy(&plan);
+	if (rc == DUCKDB_V2_ERROR_NONE) {
+		RangeBindCb(info, result, context, err);
+	}
+}
+
+} // namespace
+
+TEST_CASE("V2 context: explain from a table function bind callback", "[capi_v2][context_explain]") {
+	EnvFixture fx;
+	context_table_plan.clear();
+	ExecSQL(fx.conn, "CREATE TEMP TABLE explain_local(i INTEGER)");
+	auto function = MakeTable(fx.conn, "range_with_explain");
+	auto bigint = MakeType(fx.factory, DUCKDB_V2_LOGICAL_TYPE_ID_BIGINT);
+	TableSigParam(SigOf(function), "n", bigint);
+	duckdb_v2_logical_type_destroy(&bigint);
+	REQUIRE(duckdb_v2_table_function_set_bind_callback(function, ContextExplainTableBind, nullptr) ==
+	        DUCKDB_V2_ERROR_NONE);
+	REQUIRE(duckdb_v2_table_function_set_init_global_callback(function, RangeInitGlobalCb, nullptr) ==
+	        DUCKDB_V2_ERROR_NONE);
+	REQUIRE(duckdb_v2_table_function_set_exec_callback(function, RangeExecCb, nullptr) == DUCKDB_V2_ERROR_NONE);
+	REQUIRE(duckdb_v2_connection_register_table_function(fx.conn, function, nullptr) == DUCKDB_V2_ERROR_NONE);
+	duckdb_v2_table_function_destroy(&function);
+	REQUIRE(QueryI64(fx.conn, "SELECT count(*) FROM range_with_explain(3)") == 3);
+	REQUIRE(context_table_plan.find("explain_local") != std::string::npos);
+	REQUIRE(context_table_plan.find("SEQ_SCAN") != std::string::npos);
+	ExecSQL(fx.conn, "PREPARE inspection AS SELECT count(*) FROM range_with_explain(3)");
+	context_table_plan.clear();
+	REQUIRE(QueryI64(fx.conn, "EXECUTE inspection") == 3);
+	REQUIRE(context_table_plan.find("explain_local") != std::string::npos);
+	ExecSQL(fx.conn, "DROP TABLE explain_local");
+	REQUIRE(RunSql(fx.conn, "EXECUTE inspection") != DUCKDB_V2_ERROR_NONE);
+}
+
 } // namespace test_capi_v2

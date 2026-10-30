@@ -214,6 +214,10 @@ Executor &ClientContext::GetExecutor() {
 	return *active_query->executor;
 }
 
+bool ClientContext::HasExecutor() const {
+	return active_query && active_query->executor;
+}
+
 const string &ClientContext::GetCurrentQuery() {
 	D_ASSERT(active_query);
 	return active_query->query;

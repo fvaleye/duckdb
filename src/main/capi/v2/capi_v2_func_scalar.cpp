@@ -173,7 +173,7 @@ static auto CV2ScalarBind(BindScalarFunctionInput &input) -> unique_ptr<Function
 
 	CV2ErrorInfo err = {};
 	auto err_ptr = Convert(&err);
-	CV2CallbackContext callback_context(input.GetClientContext());
+	CV2CallbackContext callback_context(input.GetClientContext(), input.HasBinder() ? &input.GetBinder() : nullptr);
 	info.bind_cb(Convert(&bind_info), Convert(&result_info), Convert(&callback_context), &err_ptr);
 
 	unique_ptr<FunctionData> result = nullptr;

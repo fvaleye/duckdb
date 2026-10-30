@@ -109,6 +109,18 @@ void PsSeedTable(duckdb_v2_connection_handle conn) {
 // survives every execution.
 // ===========================================================================
 
+TEST_CASE("V2: prepared EXECUTE refreshes query-dependent arguments", "[capi_v2][prepared_statement]") {
+	EnvFixture fx;
+	ExecSQL(fx.conn, "PREPARE passthrough AS SELECT $1::BIGINT");
+	ExecSQL(fx.conn, "SET VARIABLE argument = 1");
+	auto prepared = PsPrepare(fx.conn, "EXECUTE passthrough(getvariable('argument'))");
+	REQUIRE(prepared != nullptr);
+	ExecSQL(fx.conn, "SET VARIABLE argument = 2");
+	auto rows = PsExecuteWith(fx.factory, prepared, {});
+	duckdb_v2_prepared_statement_destroy(&prepared);
+	REQUIRE(rows == std::vector<int64_t> {2});
+}
+
 TEST_CASE("V2: a prepared statement executes repeatedly", "[capi_v2][prepared_statement]") {
 	EnvFixture fx;
 	PsSeedTable(fx.conn);

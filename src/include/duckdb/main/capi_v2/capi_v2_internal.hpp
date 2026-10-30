@@ -65,6 +65,7 @@ static_assert(offsetof(duckdb_v2_bytes, value.inlined.inlined) == 4,
 namespace duckdb {
 
 class AggregateFunctionProperties;
+class Binder;
 
 namespace capiv2 {
 
@@ -404,8 +405,8 @@ private:
 //! A context handle: the client context plus how a call through it obtains a transaction.
 class CV2Context {
 public:
-	explicit CV2Context(ClientContext &context)
-	    : context(context), factory(*this), config_handle(context),
+	explicit CV2Context(ClientContext &context, optional_ptr<Binder> binder = nullptr)
+	    : context(context), binder(binder), factory(*this), config_handle(context),
 	      file_system(FileSystem::GetFileSystem(context), QueryContext(context)) {
 	}
 	virtual ~CV2Context() = default;
@@ -414,6 +415,7 @@ public:
 	virtual void WithContext(const std::function<void(ClientContext &)> &fn) = 0;
 
 	ClientContext &context;
+	optional_ptr<Binder> binder;
 	CV2ContextFactory factory;
 	CV2ClientConfig config_handle;
 	CV2FileSystem file_system;
@@ -434,7 +436,8 @@ inline void CV2ContextFactory::WithTransaction(const std::function<void(ClientCo
 //! A context handed to a callback: the context lock is held and a transaction is already active.
 class CV2CallbackContext final : public CV2Context {
 public:
-	explicit CV2CallbackContext(ClientContext &context) : CV2Context(context) {
+	explicit CV2CallbackContext(ClientContext &context, optional_ptr<Binder> binder = nullptr)
+	    : CV2Context(context, binder) {
 	}
 
 	void WithContext(const std::function<void(ClientContext &)> &fn) override {

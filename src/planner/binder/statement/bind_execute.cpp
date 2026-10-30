@@ -92,6 +92,7 @@ BoundStatement Binder::Bind(ExecuteStatement &stmt) {
 	// copy the properties of the prepared statement into the planner
 	auto &properties = GetStatementProperties();
 	properties = prepared->properties;
+	properties.always_require_rebind |= constant_binder->GetStatementProperties().always_require_rebind;
 	properties.parameter_count = parameter_count;
 
 	BoundStatement result;

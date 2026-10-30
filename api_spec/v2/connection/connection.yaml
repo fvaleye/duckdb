@@ -30,6 +30,64 @@ functions:
         kind: OUT
         description: "Optional. On failure, receives an opaque info handle the caller must destroy via `[[error_info_destroy]]`."
     return_type: ERROR
+  context_explain_json:
+    lifecycle:
+      - [ "unstable", "v2.0.0", "2026-10-30" ]
+    description: |
+      Returns the optimized physical plan of a single SQL statement as EXPLAIN JSON.
+
+      Uses the context's catalog, session settings and active transaction, including
+      temporary tables and uncommitted changes. Supported in scalar and table function
+      bind callbacks before query execution starts. Other callback phases, including
+      init and exec, and bind callbacks reached during query execution are rejected.
+      Retain the returned value in bind data for use during execution. The containing
+      statement is rebound on every execution so prepared calls do not reuse an old plan.
+
+      The statement is planned but not executed;
+      binding and optimization have the same effects as EXPLAIN. No result cursor is
+      opened and the surrounding query remains active.
+
+      The output always contains the physical plan, independently of explain_output.
+      Empty input, multiple statements, and statements requiring expansion (such as
+      PIVOT without an IN clause) are rejected. Calls cannot be nested: a statement
+      whose binding reaches another context_explain_json call is rejected. Errors leave
+      out_plan NULL.
+    role: method
+    belongs_to: context
+    parameters:
+      ctx:
+        type: context
+        description: The borrowed context supplied to a scalar or table function bind callback.
+      sql:
+        type: char
+        indirection: 1
+        const: true
+        description: Null-terminated SQL containing exactly one statement.
+      parameter_names:
+        type: identifier
+        indirection: 1
+        const: true
+        kind: IN
+        description: Optional. Parameter names, with the same named and positional binding rules as `[[statement_execute]]`.
+      parameter_values:
+        type: value
+        indirection: 1
+        const: true
+        description: Optional. Borrowed parameter values, copied in. Required when parameter_count is nonzero.
+      parameter_count:
+        type: idx
+        description: The number of entries in parameter_names and parameter_values, or zero for no parameters.
+      out_plan:
+        type: value
+        indirection: 1
+        kind: OUT
+        description: Receives an owned VARCHAR value containing the JSON plan. Destroy it via `[[value_destroy]]`.
+      err:
+        type: error_info
+        indirection: 1
+        kind: OUT
+        description: Optional. On failure, receives an opaque info handle the caller must destroy via `[[error_info_destroy]]`.
+    return_type: ERROR
   connection_destroy:
     lifecycle:
       - [ "unstable", "v2.0.0", "2026-08-04" ]

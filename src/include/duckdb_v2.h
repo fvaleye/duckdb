@@ -1984,6 +1984,44 @@ DUCKDB_C_API DUCKDB_V2_ERROR duckdb_v2_connection_create(duckdb_v2_instance_hand
 
 #if DUCKDB_V2_API_ALLOW_UNSTABLE
 /*!
+ * Returns the optimized physical plan of a single SQL statement as EXPLAIN JSON.
+ *
+ * Uses the context's catalog, session settings and active transaction, including temporary tables and uncommitted
+ * changes. Supported in scalar and table function bind callbacks before query execution starts. Other callback phases,
+ * including init and exec, and bind callbacks reached during query execution are rejected. Retain the returned value in
+ * bind data for use during execution. The containing statement is rebound on every execution so prepared calls do not
+ * reuse an old plan.
+ *
+ * The statement is planned but not executed; binding and optimization have the same effects as EXPLAIN. No result
+ * cursor is opened and the surrounding query remains active.
+ *
+ * The output always contains the physical plan, independently of explain_output. Empty input, multiple statements, and
+ * statements requiring expansion (such as PIVOT without an IN clause) are rejected. Calls cannot be nested: a statement
+ * whose binding reaches another context_explain_json call is rejected. Errors leave out_plan NULL.
+ *
+ * history:
+ * - unstable: v2.0.0
+ *
+ * @param ctx The borrowed context supplied to a scalar or table function bind callback.
+ * @param sql Null-terminated SQL containing exactly one statement.
+ * @param parameter_names Optional. Parameter names, with the same named and positional binding rules as
+ * `duckdb_v2_statement_execute()`.
+ * @param parameter_values Optional. Borrowed parameter values, copied in. Required when parameter_count is nonzero.
+ * @param parameter_count The number of entries in parameter_names and parameter_values, or zero for no parameters.
+ * @param out_plan Receives an owned VARCHAR value containing the JSON plan. Destroy it via `duckdb_v2_value_destroy()`.
+ * @param err Optional. On failure, receives an opaque info handle the caller must destroy via
+ * `duckdb_v2_error_info_destroy()`.
+ * @return DUCKDB_V2_ERROR
+ */
+DUCKDB_C_API DUCKDB_V2_ERROR duckdb_v2_context_explain_json(duckdb_v2_context_handle ctx, const char *sql,
+                                                            const duckdb_v2_identifier_t *parameter_names,
+                                                            const duckdb_v2_value_handle *parameter_values,
+                                                            idx_t parameter_count, duckdb_v2_value_handle *out_plan,
+                                                            duckdb_v2_error_info_handle *err);
+#endif
+
+#if DUCKDB_V2_API_ALLOW_UNSTABLE
+/*!
  * Destroys the connection.
  *
  * Always succeeds. Releases the connection's reference on the underlying database instance, which survives for as long

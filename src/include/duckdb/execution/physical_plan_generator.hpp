@@ -105,6 +105,8 @@ public:
 	//! Creates and returns the physical plan from the logical operator.
 	//! Performs a verification pass.
 	unique_ptr<PhysicalPlan> Plan(unique_ptr<LogicalOperator> logical);
+	//! Creates a physical plan while leaving ownership of the logical plan with the caller.
+	unique_ptr<PhysicalPlan> Plan(LogicalOperator &logical);
 	PhysicalOperator &CreatePlan(LogicalOperator &op);
 
 	//! Whether or not we can (or should) use a batch-index based operator for executing the given sink
@@ -202,6 +204,7 @@ private:
 private:
 	PhysicalOperator &CreatePlanInternal(LogicalOperator &op);
 	PhysicalOperator &ResolveAndPlan(unique_ptr<LogicalOperator> logical);
+	PhysicalOperator &ResolveAndPlan(LogicalOperator &logical);
 	unique_ptr<PhysicalPlan> PlanInternal(LogicalOperator &logical);
 	bool PreserveInsertionOrder(PhysicalOperator &plan);
 	bool UseBatchIndex(PhysicalOperator &plan);

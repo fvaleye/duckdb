@@ -22,31 +22,39 @@ PhysicalPlanGenerator::~PhysicalPlanGenerator() {
 }
 
 unique_ptr<PhysicalPlan> PhysicalPlanGenerator::Plan(unique_ptr<LogicalOperator> op) {
-	auto &plan = ResolveAndPlan(std::move(op));
+	return Plan(*op);
+}
+
+unique_ptr<PhysicalPlan> PhysicalPlanGenerator::Plan(LogicalOperator &op) {
+	auto &plan = ResolveAndPlan(op);
 	plan.Verify();
 	return std::move(physical_plan);
 }
 
 PhysicalOperator &PhysicalPlanGenerator::ResolveAndPlan(unique_ptr<LogicalOperator> op) {
+	return ResolveAndPlan(*op);
+}
+
+PhysicalOperator &PhysicalPlanGenerator::ResolveAndPlan(LogicalOperator &op) {
 	auto &profiler = QueryProfiler::Get(context);
 
 	// Resolve the types of each operator.
 	{
 		auto timer = profiler.StartTimer<MetricPhysicalPlannerResolveTypes>();
-		op->ResolveOperatorTypes();
+		op.ResolveOperatorTypes();
 	}
 
 	// Resolve the column references.
 	{
 		auto timer = profiler.StartTimer<MetricPhysicalPlannerColumnBinding>();
 		ColumnBindingResolver resolver;
-		resolver.VisitOperator(*op);
+		resolver.VisitOperator(op);
 	}
 
 	// Create the main physical plan.
 	{
 		auto timer = profiler.StartTimer<MetricPhysicalPlannerCreatePlan>();
-		physical_plan = PlanInternal(*op);
+		physical_plan = PlanInternal(op);
 	}
 
 	// Return a reference to the root of this plan.
